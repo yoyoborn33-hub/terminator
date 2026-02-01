@@ -3,6 +3,7 @@ import logging
 import random
 import os
 import sys
+import string
 from collections import defaultdict
 from aiohttp import web
 
@@ -12,138 +13,160 @@ from aiogram.types import Message
 from aiogram.enums import ChatMemberStatus
 
 # --- КОНФИГУРАЦИЯ ---
-# БЕЗОПАСНОСТЬ: Токен теперь берется ТОЛЬКО из переменных окружения.
 TOKEN = os.getenv("BOT_TOKEN")
-
-# Имя пользователя, которому разрешено видеть токен (без @)
 ADMIN_USERNAME = "honobread"
 
-# Простая проверка, чтобы бот не падал с непонятной ошибкой, если токена нет
 if not TOKEN:
     print("ОШИБКА: Токен не найден! Установите переменную окружения BOT_TOKEN.")
     if not TOKEN:
         sys.exit(1)
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
-
-# Инициализация бота и диспетчера
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- ЛОГИКА "МОЗГА" (ЦЕПИ МАРКОВА) ---
+# --- ЛОГИКА "МОЗГА" ---
+# Теперь храним не только связи, но и все известные слова для поиска
 markov_chain = defaultdict(list)
 START_WORD = "___START___"
 END_WORD = "___END___"
 
 def train_brain(text):
-    """Обучает бота новым словам из сообщения"""
+    """Обучает бота"""
+    # Убираем лишние символы для чистоты обучения
+    text = text.translate(str.maketrans('', '', string.punctuation.replace('-', '')))
     words = text.split()
+    
     if len(words) < 2:
         return
 
-    # Добавляем стартовую связь
+    # Связываем Start -> Первое слово
     markov_chain[START_WORD].append(words[0])
 
-    # Связываем слова друг с другом
     for i in range(len(words) - 1):
-        markov_chain[words[i]].append(words[i + 1])
+        current_word = words[i]
+        next_word = words[i + 1]
+        markov_chain[current_word].append(next_word)
     
-    # Добавляем конечную связь
+    # Связываем Последнее слово -> End
     markov_chain[words[-1]].append(END_WORD)
 
-def generate_sentence():
-    """Генерирует предложение на основе изученного"""
+def generate_sentence(seed_word=None):
+    """Генерирует предложение. Если есть seed_word, пытается начать с него."""
     if not markov_chain.get(START_WORD):
-        return "Я еще слишком мало знаю..."
+        return "Я еще слишком мало знаю... Пообщайтесь со мной!"
 
-    word = random.choice(markov_chain[START_WORD])
-    sentence = [word]
+    current_word = None
 
-    # Генерируем цепочку (максимум 30 слов)
-    for _ in range(30):
-        next_words = markov_chain.get(word)
+    # 1. Пытаемся использовать ключевое слово из вопроса
+    if seed_word:
+        # Ищем точное совпадение или похожее слово (с разным регистром)
+        # Создаем список всех ключей (слов), которые знает бот
+        known_words = list(markov_chain.keys())
+        
+        # Пытаемся найти наше слово среди известных
+        for word in known_words:
+            if word.lower() == seed_word.lower() and word != START_WORD and word != END_WORD:
+                current_word = word
+                break
+    
+    # 2. Если ключевое слово не нашли или его не дали, берем случайное начало
+    if not current_word:
+        current_word = random.choice(markov_chain[START_WORD])
+
+    # Начинаем строить предложение
+    sentence = [current_word]
+    
+    # Если начали с середины (по ключевому слову), сделаем первую букву заглавной
+    if seed_word:
+        sentence[0] = sentence[0].capitalize()
+
+    for _ in range(40): # Максимум 40 слов
+        next_words = markov_chain.get(current_word)
+        
         if not next_words:
             break
+            
+        next_word = random.choice(next_words)
         
-        word = random.choice(next_words)
-        if word == END_WORD:
+        if next_word == END_WORD:
             break
-        sentence.append(word)
+            
+        sentence.append(next_word)
+        current_word = next_word
 
     return " ".join(sentence)
 
-# --- ХЕНДЛЕРЫ (КОМАНДЫ) ---
+# --- ХЕНДЛЕРЫ ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer("Привет! Я учусь говорить как вы, а еще могу банить плохих парней. Просто добавь меня в чат и дай права админа.")
+    await message.answer("Привет! Я учу слова и пытаюсь отвечать в тему. Просто пиши в чат!")
 
 @dp.message(Command("ban"))
 async def cmd_ban(message: Message):
-    """Команда /ban (работает только в ответ на сообщение)"""
     if not message.reply_to_message:
-        await message.reply("Эту команду нужно писать в ответ на сообщение нарушителя.")
+        await message.reply("Эту команду нужно писать в ответ на сообщение.")
         return
 
-    # Проверка прав администратора у того, кто вызывает команду
     user_status = await bot.get_chat_member(message.chat.id, message.from_user.id)
     if user_status.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
-        await message.reply("У тебя нет прав админа, чтобы банить людей!")
+        await message.reply("Ты не админ!")
         return
 
-    # Проверка прав бота
     bot_status = await bot.get_chat_member(message.chat.id, bot.id)
     if not bot_status.can_restrict_members and bot_status.status != ChatMemberStatus.ADMINISTRATOR:
-        await message.reply("Дайте мне права администратора (банить пользователей), чтобы я мог это сделать.")
+        await message.reply("Дай мне права админа!")
         return
 
     try:
-        user_to_ban = message.reply_to_message.from_user
-        await bot.ban_chat_member(message.chat.id, user_to_ban.id)
-        await message.answer(f"Пользователь {user_to_ban.full_name} был забанен! 🔨")
+        await bot.ban_chat_member(message.chat.id, message.reply_to_message.from_user.id)
+        await message.answer("Забанен! 🔨")
     except Exception as e:
-        await message.reply(f"Не удалось забанить: {e}")
+        await message.reply(f"Ошибка: {e}")
 
 @dp.message(Command("get_token"))
 async def cmd_get_token(message: Message):
-    """Секретная команда для владельца"""
-    user_username = message.from_user.username
-    
-    # Сравниваем username (без @) с разрешенным
-    if user_username == ADMIN_USERNAME:
-        # Отправляем токен. Используем Markdown для удобного копирования
-        await message.answer(f"🕵️ <b>Владелец подтвержден ({ADMIN_USERNAME}).</b>\n\nТвой токен:\n<code>{TOKEN}</code>", parse_mode="HTML")
+    if message.from_user.username == ADMIN_USERNAME:
+        await message.answer(f"Твой токен:\n<code>{TOKEN}</code>", parse_mode="HTML")
     else:
-        # Если пишет кто-то другой
-        await message.answer(f"⛔ Доступ запрещен. Я не знаю пользователя {user_username}.")
+        await message.answer("Доступ запрещен.")
 
-
-# --- ОБРАБОТКА ОБЫЧНЫХ СООБЩЕНИЙ (ОБУЧЕНИЕ) ---
 @dp.message(F.text)
 async def chat_handler(message: Message):
-    # Не учиться на командах
     if message.text.startswith("/"):
         return
 
     # 1. Обучение
     train_brain(message.text)
 
-    # 2. Ответ бота
+    # 2. Логика ответа
     should_reply = False
+    is_question = message.text.strip().endswith("?")
     
+    # Шансы на ответ:
     if message.chat.type == 'private':
-        should_reply = True
+        should_reply = True # В ЛС отвечаем всегда
     elif f"@{bot.id}" in message.text or (message.reply_to_message and message.reply_to_message.from_user.id == bot.id):
-        should_reply = True
-    elif random.random() < 0.10: # 10% шанс ответить
-        should_reply = True
+        should_reply = True # Если тегнули или ответили боту - 100% ответ
+    elif is_question and random.random() < 0.40: 
+        should_reply = True # На вопросы в чате отвечаем с шансом 40%
+    elif random.random() < 0.05:
+        should_reply = True # Просто так влезаем с шансом 5%
 
     if should_reply:
-        text = generate_sentence()
+        # Попытка найти тему для разговора (Seed Word)
+        seed = None
+        if is_question:
+            # Берем слова длиннее 3 букв из вопроса
+            words = [w for w in message.text.split() if len(w) > 3]
+            if words:
+                seed = random.choice(words) # Выбираем случайное слово из вопроса как тему
+        
+        text = generate_sentence(seed_word=seed)
         await message.reply(text)
 
-# --- ВЕБ-СЕРВЕР (Для работы 24/7 на Render) ---
+# --- SERVER ---
 async def handle(request):
     return web.Response(text="I am alive")
 
@@ -156,18 +179,9 @@ async def start_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# --- ЗАПУСК ---
 async def main():
-    print("Бот запущен...")
-    # Удаляем вебхуки и запускаем всё вместе
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    await asyncio.gather(
-        dp.start_polling(bot),
-        start_server()
-    )
+    await asyncio.gather(dp.start_polling(bot), start_server())
 
 if __name__ == "__main__":
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
