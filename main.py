@@ -13,6 +13,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramConflictError
 
 # --- КОНФИГУРАЦИЯ ---
 TOKEN = os.getenv("BOT_TOKEN")
@@ -28,7 +29,7 @@ if not TOKEN:
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-BOT_USERNAME = "" # Сюда запишем имя бота при старте
+BOT_USERNAME = "" 
 
 # --- ЛОГИКА "МОЗГА" ---
 markov_chain = defaultdict(list)
@@ -55,7 +56,6 @@ def save_brain():
     try:
         with open(DB_FILE, 'w', encoding='utf-8') as f:
             json.dump(markov_chain, f, ensure_ascii=False)
-        # print("Память сохранена.") # Убрал спам в логи
     except Exception as e:
         print(f"Ошибка сохранения памяти: {e}")
 
@@ -65,9 +65,11 @@ def clean_brain():
         print(f"🧹 Очистка памяти! Было слов: {len(markov_chain)}")
         keys = list(markov_chain.keys())
         if START_WORD in keys: keys.remove(START_WORD)
-        keys_to_remove = random.sample(keys, int(len(keys) * 0.2))
-        for key in keys_to_remove:
-            del markov_chain[key]
+        # Если ключей мало, не удаляем, чтобы не сломать random.sample
+        if len(keys) > 10:
+            keys_to_remove = random.sample(keys, int(len(keys) * 0.2))
+            for key in keys_to_remove:
+                del markov_chain[key]
         print(f"✨ Память очищена. Стало слов: {len(markov_chain)}")
 
 def train_brain(text):
@@ -89,7 +91,7 @@ def train_brain(text):
 
 def generate_sentence(seed_word=None):
     if not markov_chain.get(START_WORD):
-        return "Я еще слишком мало знаю..."
+        return "Я еще слишком мало знаю... Пообщайтесь со мной!"
 
     current_word = None
     if seed_word:
@@ -98,7 +100,10 @@ def generate_sentence(seed_word=None):
         elif seed_word.lower() in markov_chain: current_word = seed_word.lower()
     
     if not current_word:
-        current_word = random.choice(markov_chain[START_WORD])
+        try:
+            current_word = random.choice(markov_chain[START_WORD])
+        except IndexError:
+            return "Я забыл слова... Напиши что-нибудь!"
 
     sentence = [current_word]
     if seed_word and current_word == seed_word:
@@ -118,7 +123,11 @@ def generate_sentence(seed_word=None):
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer("Я бот-шпион с исправленным слухом! Теперь я точно отзовусь, если меня тегнуть.")
+    await message.answer("Я перезагрузился! Если я молчу, проверь команду /ping")
+
+@dp.message(Command("ping"))
+async def cmd_ping(message: Message):
+    await message.answer(f"🏓 Понг! Я тут. Мозг: {len(markov_chain)} слов.")
 
 @dp.message(Command("silent"))
 async def cmd_silent(message: Message):
@@ -132,11 +141,8 @@ async def cmd_silent(message: Message):
 
 @dp.message(Command("say"))
 async def cmd_say(message: Message):
-    """Принудительно заставляет бота говорить"""
-    # Получаем текст после команды /say
     args = message.text.split(maxsplit=1)
     seed = args[1] if len(args) > 1 else None
-    
     text = generate_sentence(seed_word=seed)
     await message.reply(text)
 
@@ -164,7 +170,6 @@ async def cmd_ban(message: Message):
         await message.reply("Пиши в ответ на сообщение.")
         return
     
-    # Проверка на админа
     user_status = await bot.get_chat_member(message.chat.id, message.from_user.id)
     if user_status.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
         await message.reply("Ты не админ!")
@@ -214,19 +219,12 @@ async def chat_handler(message: Message):
         should_reply = False
         is_question = message.text.strip().endswith("?")
         
-        # ЛС - всегда отвечать
         if message.chat.type == 'private':
             should_reply = True
-        
-        # Исправленная проверка тега (теперь работает!)
         elif f"@{BOT_USERNAME}" in message.text:
             should_reply = True
-            
-        # Ответ на сообщение бота
         elif message.reply_to_message and message.reply_to_message.from_user.id == bot.id:
             should_reply = True
-            
-        # Случайность
         elif is_question and random.random() < 0.50:
             should_reply = True 
         elif random.random() < 0.07:
@@ -240,10 +238,6 @@ async def chat_handler(message: Message):
             
             text = generate_sentence(seed_word=seed)
             await message.reply(text)
-        else:
-            # Для отладки в логах (чтобы понять, почему молчит)
-            # print("SKIP: Random/Logic") 
-            pass
             
     except Exception as e:
         logging.error(f"Ошибка в chat_handler: {e}")
@@ -265,14 +259,25 @@ async def main():
     global BOT_USERNAME
     load_brain()
     
-    # Получаем информацию о боте (чтобы узнать username)
-    me = await bot.get_me()
-    BOT_USERNAME = me.username
-    print(f"Бот запущен как @{BOT_USERNAME}")
+    # Получаем информацию о боте
+    try:
+        me = await bot.get_me()
+        BOT_USERNAME = me.username
+        print(f"✅ БОТ ЗАПУЩЕН: @{BOT_USERNAME}")
+    except Exception as e:
+        print(f"❌ ОШИБКА ПРИ ЗАПУСКЕ: {e}")
 
     await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Запускаем с защитой от ошибок
     try:
         await asyncio.gather(dp.start_polling(bot), start_server())
+    except TelegramConflictError:
+        print("\n!!! КРИТИЧЕСКАЯ ОШИБКА КОНФЛИКТА !!!")
+        print("Два бота запущены с одним токеном.")
+        print("РЕШЕНИЕ: Зайди в BotFather, нажми Revoke Token и вставь новый токен в Render.\n")
+    except Exception as e:
+        print(f"ОШИБКА В main: {e}")
     finally:
         save_brain()
 
