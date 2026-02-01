@@ -5,6 +5,7 @@ import os
 import sys
 import string
 import json
+import io
 from collections import defaultdict
 from aiohttp import web
 
@@ -20,7 +21,6 @@ DB_FILE = "brain.json" # Файл для хранения памяти
 
 if not TOKEN:
     print("ОШИБКА: Токен не найден! Установите переменную окружения BOT_TOKEN.")
-    # Если мы локально, не падаем сразу, даем шанс (но лучше задать переменную)
     if not TOKEN:
         sys.exit(1)
 
@@ -32,7 +32,8 @@ dp = Dispatcher()
 markov_chain = defaultdict(list)
 START_WORD = "___START___"
 END_WORD = "___END___"
-message_counter = 0 # Счётчик для периодического сохранения
+message_counter = 0 
+SILENT_MODE = False # Режим шпиона (по умолчанию выключен)
 
 def load_brain():
     """Загружает базу знаний из файла"""
@@ -41,7 +42,6 @@ def load_brain():
         if os.path.exists(DB_FILE):
             with open(DB_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                # JSON возвращает dict, нам нужен defaultdict
                 markov_chain = defaultdict(list, data)
             print(f"Загружено {len(markov_chain)} слов из памяти.")
         else:
@@ -62,14 +62,14 @@ def save_brain():
 def train_brain(text):
     """Обучает бота"""
     global message_counter
-    # Убираем лишние символы, но оставляем структуру
+    # Очистка текста
     text = text.translate(str.maketrans('', '', string.punctuation.replace('-', '')))
     words = text.split()
     
     if len(words) < 2:
         return
 
-    # Обучение (цепь Маркова)
+    # Обучение
     markov_chain[START_WORD].append(words[0])
 
     for i in range(len(words) - 1):
@@ -77,7 +77,7 @@ def train_brain(text):
     
     markov_chain[words[-1]].append(END_WORD)
 
-    # Сохраняем каждые 50 сообщений, чтобы не потерять данные
+    # Сохраняем каждые 50 новых фраз
     message_counter += 1
     if message_counter >= 50:
         save_brain()
@@ -86,23 +86,18 @@ def train_brain(text):
 def generate_sentence(seed_word=None):
     """Генерирует предложение"""
     if not markov_chain.get(START_WORD):
-        return "Я еще слишком мало знаю... Пообщайтесь со мной!"
+        return "Я еще слишком мало знаю..."
 
     current_word = None
 
-    # 1. Пытаемся использовать ключевое слово (ОПТИМИЗИРОВАНО)
-    # Мы больше не перебираем все ключи (это убивало память), а проверяем наличие напрямую
     if seed_word:
-        # Пробуем найти слово как есть
         if seed_word in markov_chain:
             current_word = seed_word
-        # Если не нашли, пробуем с большой/маленькой буквы (простой перебор вариантов)
         elif seed_word.capitalize() in markov_chain:
             current_word = seed_word.capitalize()
         elif seed_word.lower() in markov_chain:
             current_word = seed_word.lower()
     
-    # 2. Если слово не нашли, берем случайное начало
     if not current_word:
         current_word = random.choice(markov_chain[START_WORD])
 
@@ -110,18 +105,11 @@ def generate_sentence(seed_word=None):
     if seed_word and current_word == seed_word:
         sentence[0] = sentence[0].capitalize()
 
-    # Генерация цепочки
-    for _ in range(50): # Максимум 50 слов
+    for _ in range(50):
         next_words = markov_chain.get(current_word)
-        
-        if not next_words:
-            break
-            
+        if not next_words: break
         next_word = random.choice(next_words)
-        
-        if next_word == END_WORD:
-            break
-            
+        if next_word == END_WORD: break
         sentence.append(next_word)
         current_word = next_word
 
@@ -131,40 +119,58 @@ def generate_sentence(seed_word=None):
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer("Привет! Я перезагрузился и стал умнее (и экономнее).")
+    await message.answer("Я бот-шпион. Добавь меня в чат, дай права админа и отключи Privacy Mode в BotFather.")
+
+@dp.message(Command("silent"))
+async def cmd_silent(message: Message):
+    """Включает/выключает режим молчания (только учится)"""
+    global SILENT_MODE
+    # Разрешаем менять режим только админу бота (тебе)
+    if message.from_user.username == ADMIN_USERNAME:
+        SILENT_MODE = not SILENT_MODE
+        status = "ВКЛЮЧЕН 🤫 (Я молчу и запоминаю)" if SILENT_MODE else "ВЫКЛЮЧЕН 🗣 (Я говорю)"
+        await message.answer(f"Режим шпиона {status}")
+    else:
+        await message.answer("Не трогай мои настройки!")
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
-    """Показывает статистику знаний"""
     words_count = len(markov_chain)
     pairs_count = sum(len(v) for v in markov_chain.values())
-    await message.answer(f"🧠 <b>Состояние мозга:</b>\n"
-                         f"Слов в словаре: {words_count}\n"
-                         f"Всего связей: {pairs_count}", parse_mode="HTML")
+    mode_text = "Тихий (Шпион)" if SILENT_MODE else "Активный (Болтун)"
+    await message.answer(f"🧠 <b>Мозг:</b>\nСлов: {words_count}\nСвязей: {pairs_count}\nРежим: {mode_text}", parse_mode="HTML")
 
 @dp.message(Command("reset"))
 async def cmd_reset(message: Message):
-    """Сброс памяти (только для админа)"""
     if message.from_user.username == ADMIN_USERNAME:
         global markov_chain
         markov_chain = defaultdict(list)
-        save_brain() # Сохраняем пустой файл
-        await message.answer("🤯 Мозг полностью очищен! Я забыл всё, что знал.")
+        save_brain()
+        await message.answer("🤯 Память стерта.")
     else:
-        await message.answer("Только создатель может стирать мне память.")
+        await message.answer("Доступ запрещен.")
 
 @dp.message(Command("ban"))
 async def cmd_ban(message: Message):
     if not message.reply_to_message:
-        await message.reply("Эту команду нужно писать в ответ на сообщение.")
+        await message.reply("Пиши в ответ на сообщение.")
         return
 
-    # Проверка прав (пропускаем для краткости, она такая же)
+    user_status = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    if user_status.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+        await message.reply("Ты не админ!")
+        return
+
+    bot_status = await bot.get_chat_member(message.chat.id, bot.id)
+    if not bot_status.can_restrict_members and bot_status.status != ChatMemberStatus.ADMINISTRATOR:
+        await message.reply("Дай мне права админа!")
+        return
+
     try:
         await bot.ban_chat_member(message.chat.id, message.reply_to_message.from_user.id)
         await message.answer("Забанен! 🔨")
     except Exception as e:
-        await message.reply(f"Не удалось забанить. Дайте мне права админа!")
+        await message.reply(f"Ошибка: {e}")
 
 @dp.message(Command("get_token"))
 async def cmd_get_token(message: Message):
@@ -173,29 +179,60 @@ async def cmd_get_token(message: Message):
     else:
         await message.answer("Доступ запрещен.")
 
+# Обработка файлов .txt (для быстрого обучения)
+@dp.message(F.document)
+async def handle_files(message: Message):
+    if message.from_user.username != ADMIN_USERNAME:
+        return
+
+    # Проверяем, что это текстовый файл
+    if message.document.mime_type == "text/plain" or message.document.file_name.endswith(".txt"):
+        try:
+            msg = await message.answer("📥 Читаю файл... Это может занять время.")
+            file_id = message.document.file_id
+            file_info = await bot.get_file(file_id)
+            
+            # Скачиваем в память
+            downloaded_file = await bot.download_file(file_info.file_path)
+            content = downloaded_file.read().decode('utf-8', errors='ignore')
+            
+            # Обучаем построчно
+            lines = content.split('\n')
+            count = 0
+            for line in lines:
+                if line.strip():
+                    train_brain(line)
+                    count += 1
+            
+            save_brain()
+            await msg.edit_text(f"✅ Файл прочитан! Изучено {count} новых фраз.")
+        except Exception as e:
+            await message.reply(f"Ошибка чтения файла: {e}")
+
 @dp.message(F.text)
 async def chat_handler(message: Message):
     if message.text.startswith("/"):
         return
 
     try:
-        # 1. Обучение
+        # 1. Обучение (работает ВСЕГДА, даже в тихом режиме)
         train_brain(message.text)
+
+        # Если включен Тихий режим - выходим, не отвечая
+        if SILENT_MODE:
+            return
 
         # 2. Логика ответа
         should_reply = False
         is_question = message.text.strip().endswith("?")
         
-        # Если это ЛС
         if message.chat.type == 'private':
             should_reply = True
-        # Если тегнули
         elif f"@{bot.id}" in message.text or (message.reply_to_message and message.reply_to_message.from_user.id == bot.id):
             should_reply = True
-        # Рандом
-        elif is_question and random.random() < 0.50: # 50% на вопросы
+        elif is_question and random.random() < 0.50:
             should_reply = True 
-        elif random.random() < 0.07: # 7% на обычные
+        elif random.random() < 0.07:
             should_reply = True
 
         if should_reply:
@@ -210,7 +247,6 @@ async def chat_handler(message: Message):
             
     except Exception as e:
         logging.error(f"Ошибка в chat_handler: {e}")
-        # Если ошибка, просто молчим, чтобы не спамить в чат логами
 
 # --- SERVER ---
 async def handle(request):
@@ -226,14 +262,11 @@ async def start_server():
     await site.start()
 
 async def main():
-    # Загружаем память при старте
     load_brain()
-    
     await bot.delete_webhook(drop_pending_updates=True)
     try:
         await asyncio.gather(dp.start_polling(bot), start_server())
     finally:
-        # Сохраняем память при выключении
         save_brain()
 
 if __name__ == "__main__":
