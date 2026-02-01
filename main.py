@@ -18,6 +18,7 @@ from aiogram.enums import ChatMemberStatus
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_USERNAME = "honobread"
 DB_FILE = "brain.json" # Файл для хранения памяти
+MAX_WORDS = 50000 # Лимит слов. 50к слов займут ~50-100МБ RAM, что безопасно для Free тарифа.
 
 if not TOKEN:
     print("ОШИБКА: Токен не найден! Установите переменную окружения BOT_TOKEN.")
@@ -59,6 +60,25 @@ def save_brain():
     except Exception as e:
         print(f"Ошибка сохранения памяти: {e}")
 
+def clean_brain():
+    """Очищает память, если она переполнена"""
+    global markov_chain
+    if len(markov_chain) > MAX_WORDS:
+        print(f"🧹 Очистка памяти! Было слов: {len(markov_chain)}")
+        # Удаляем 20% случайных слов, чтобы освободить место для новых
+        # Превращаем ключи в список, чтобы выбрать случайные
+        keys = list(markov_chain.keys())
+        # Не удаляем спец. слова
+        if START_WORD in keys: keys.remove(START_WORD)
+        
+        # Выбираем жертв
+        keys_to_remove = random.sample(keys, int(len(keys) * 0.2))
+        
+        for key in keys_to_remove:
+            del markov_chain[key]
+            
+        print(f"✨ Память очищена. Стало слов: {len(markov_chain)}")
+
 def train_brain(text):
     """Обучает бота"""
     global message_counter
@@ -80,6 +100,7 @@ def train_brain(text):
     # Сохраняем каждые 50 новых фраз
     message_counter += 1
     if message_counter >= 50:
+        clean_brain() # Проверяем, не пора ли почистить
         save_brain()
         message_counter = 0
 
@@ -138,7 +159,9 @@ async def cmd_stats(message: Message):
     words_count = len(markov_chain)
     pairs_count = sum(len(v) for v in markov_chain.values())
     mode_text = "Тихий (Шпион)" if SILENT_MODE else "Активный (Болтун)"
-    await message.answer(f"🧠 <b>Мозг:</b>\nСлов: {words_count}\nСвязей: {pairs_count}\nРежим: {mode_text}", parse_mode="HTML")
+    # Добавили инфо о лимите
+    limit_percent = round((words_count / MAX_WORDS) * 100, 1)
+    await message.answer(f"🧠 <b>Мозг:</b>\nСлов: {words_count} / {MAX_WORDS} ({limit_percent}%)\nСвязей: {pairs_count}\nРежим: {mode_text}", parse_mode="HTML")
 
 @dp.message(Command("reset"))
 async def cmd_reset(message: Message):
