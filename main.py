@@ -4,7 +4,7 @@ import random
 import os
 import sys
 from collections import defaultdict
-from aiohttp import web # Добавляем импорт для веб-сервера
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -12,8 +12,20 @@ from aiogram.types import Message
 from aiogram.enums import ChatMemberStatus
 
 # --- КОНФИГУРАЦИЯ ---
-# Вставь сюда свой НОВЫЙ токен или используй переменную окружения (для Render)
-TOKEN = os.getenv("BOT_TOKEN", "8504431832:AAE0P881IVojCDM51tYUCLYAuuuGDunaJVY") 
+# БЕЗОПАСНОСТЬ: Токен теперь берется ТОЛЬКО из переменных окружения.
+# Если ты запускаешь бота на компьютере, тебе нужно либо создать .env файл,
+# либо временно вписать токен ниже, но НЕ ЗАБУДЬ УДАЛИТЬ перед загрузкой на GitHub!
+TOKEN = os.getenv("BOT_TOKEN")
+
+# Простая проверка, чтобы бот не падал с непонятной ошибкой, если токена нет
+if not TOKEN:
+    print("ОШИБКА: Токен не найден! Установите переменную окружения BOT_TOKEN.")
+    # Для локального теста (на своем ПК) можешь раскомментировать строку ниже и вставить токен.
+    # TOKEN = "ТВОЙ_ТОКЕН_ЗДЕСЬ" 
+    
+    # Если токен всё еще пустой, останавливаем программу
+    if not TOKEN:
+        sys.exit(1)
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -23,9 +35,6 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # --- ЛОГИКА "МОЗГА" (ЦЕПИ МАРКОВА) ---
-# В простой версии мы храним память в переменной. 
-# При перезагрузке Render (Deploy) память очистится. 
-# Для вечной памяти нужно подключать базу данных (PostgreSQL/SQLite).
 markov_chain = defaultdict(list)
 START_WORD = "___START___"
 END_WORD = "___END___"
@@ -54,7 +63,7 @@ def generate_sentence():
     word = random.choice(markov_chain[START_WORD])
     sentence = [word]
 
-    # Генерируем цепочку (максимум 30 слов, чтобы не спамил поэмами)
+    # Генерируем цепочку (максимум 30 слов)
     for _ in range(30):
         next_words = markov_chain.get(word)
         if not next_words:
@@ -109,32 +118,20 @@ async def chat_handler(message: Message):
     # 1. Обучение
     train_brain(message.text)
 
-    # 2. Ответ бота (с вероятностью 10% или если к нему обратились)
-    # Также отвечает, если это личные сообщения (Private)
+    # 2. Ответ бота
     should_reply = False
     
     if message.chat.type == 'private':
         should_reply = True
     elif f"@{bot.id}" in message.text or (message.reply_to_message and message.reply_to_message.from_user.id == bot.id):
         should_reply = True
-    elif random.random() < 0.10: # 10% шанс ответить просто так в чате
+    elif random.random() < 0.10: # 10% шанс ответить
         should_reply = True
 
     if should_reply:
         text = generate_sentence()
         await message.reply(text)
 
-# --- ЗАПУСК ---
-async def main():
-    print("Бот запущен...")
-    # Удаляем вебхуки, если были, и запускаем поллинг
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    asyncio.run(main())
 # --- ВЕБ-СЕРВЕР (Для работы 24/7 на Render) ---
 async def handle(request):
     return web.Response(text="I am alive")
@@ -142,7 +139,6 @@ async def handle(request):
 async def start_server():
     app = web.Application()
     app.router.add_get('/', handle)
-    # Render предоставляет порт через переменную окружения PORT
     port = int(os.environ.get("PORT", 8080))
     runner = web.AppRunner(app)
     await runner.setup()
@@ -152,10 +148,9 @@ async def start_server():
 # --- ЗАПУСК ---
 async def main():
     print("Бот запущен...")
-    # Удаляем вебхуки, если были
+    # Удаляем вебхуки и запускаем всё вместе
     await bot.delete_webhook(drop_pending_updates=True)
     
-    # Запускаем и бота (polling), и веб-сервер параллельно
     await asyncio.gather(
         dp.start_polling(bot),
         start_server()
